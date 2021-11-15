@@ -1,0 +1,135 @@
+	1. I saved the 100 customer reviews with the highest helpfulness scores as their own files using the following commands:
+
+db=~/amazon_reviews_us_Books_v1_02.tsv;
+sort -t'       ' -nrk9 $db | head -n100 | while read line; do echo "$line" > $(echo "$line" | awk '{fname = sprintf("%s%s%s", "REVIEWS/", $2, ".txt"); print fname}'); done &
+
+	2. I lemmatized the review bodies of each review in each file using the following command:
+
+for file in REVIEWS/*; do body=$(cut -f14 $file | sed -E 's/ed |ing |s |ly / /gi'); awk -v body="$body" -F'\t' '{OFS="\t"} {$14=body; print $0}' $file > tmp; mv tmp $(echo "$file"); done;
+
+Unfortunately, this resulted in a lot of undesired changes: the word "was", for example, become "wa".
+I'm unsure of how to prevent such without overcomplicating the command, so I will leave it as is.
+
+Note that I decided to revert my changes and do (3) before (2), as stop words get affected by these undesirable changes as well and will be harder to find when questions are done in the normal order.
+
+	3. I removed as many stop words, symbols, and 1/2 character words as possible using the following command.
+
+for file in REVIEWS/*; do body=$(cut -f14 "$file" | sed "s/[,.;'#-=\"\(\)\\]\|and\|<...\/>\|\<.\>\|\<..\>\|ALSO \|COULD \|DOES \|EACH \|ELSE \|FROM \|HAVE \|JUST \|MAY \|MIGHT \|MINE \|MUST \|WHEN \|WHERE \|WHICH \|WHILE \|WITH \|WOULD \|YOUR \|AND \|ANY \|ARE \|BUT \|CAN \|DID \|FOR \|HAD \|HOW \|MAY \|NOR \|NOT \|WHO \|WHY \|YES \|YET \|YOU \|THE \|THIS \|HIS \|HER \|WAS \|THAT / /gi"); awk -v body="$body" -F'\t' '{OFS="\t"} {$14=body; print $0}' $file > tmp; mv tmp $(echo "$file"); done;
+
+	4. I made a shell script that takes a compared a review file's body to a dataset of tweet texts to append all tweets that have 2 words in common as follows:
+
+#!/bin/bash
+# $1 = REVIEWS/reviewID.txt
+# $2 = twitter dataset
+reviewwords=`head -n1 "$1" | cut -f14 | sed -r 's/[[:space:]]+/\n/g' | sed '/^$/d' | sort -u`;
+while read line;
+do
+        twmsg=`echo "$line" | awk -F',' '{print $6}'`;
+        twwords=`echo "$twmsg" | sed -r 's/[[:space:]]+/\n/g' | sed '/^$/d' | sort -u`;
+        tmpwords=`comm -12 <(echo "$reviewwords") <(echo "$twwords")`;
+        if [ `echo "$tmpwords" | wc -l` -ge 2 ];
+        then echo "$twmsg" >> "$1";
+        fi;
+done < "$2";
+
+Unfortunately, running the script with the entire twitter dataset took hours only for my session to eventually crash, so I decided to only use the first 10,000 lines of the dataset as input as follows.
+
+ln -s ~/twitter_dataset.csv twitterdb;
+head -n10000 twitterdb > twitterdb10k
+
+./commontext.sh REVIEWS/34759984.txt twitterdb10k
+
+	5. I then attempted to use the parallel command to perform the operation on all review files at the same time. Using the command below, I timed the command to see whether the parallel command made a difference.
+
+time printf '%s\n' REVIEWS/* | parallel ./commontext.sh {} twitterdb10k &
+
+	In the end, I got a "real" speed of 24 minutes and 28 seconds. I have my suspicions that the files don't actually run in parallel, as when I used "-w REVIEWS/*" to check the word count of every files as the parallel command ran in the background, only the topmost files had any change in wordcount. It seems like the files are still being passed into the script in order.
+
+	I then tried another syntactic variant of the parallel command, but I got the same "nonparallel" results as well.
+
+time parallel ./commontext.sh ::: REVIEWS/* ::: twitterdb10k &
+
+	I am uncertain as to whether this is supposed to happen, or if I simply don't understand the parallel command enough to know how to make every file get processed in parallel, rather than in order.
+
+	6. In order to get the most frequently tweeted words across all tweets in all files, I created the following shell script getfrequentwords.sh. Since I wasn't able to remove all "general" words, I decided to grab the top 20 words instead of the top 10 words for the most helpful reviews.
+
+#!/bin/bash
+# $1 = REVIEWS/*
+parallel='/home/phung/parallel-20211022/src/parallel';
+splitWords () { head -n+2 "$1" | sed -r 's/[[:space:]]+/\n/g' | sed '/^$/d'; }
+getWordFrequency () { sort | uniq -c | sort -nr; }
+export -f splitWords;
+printf '%s\n' "$1" | $parallel splitWords | getWordFrequency | head -n20;
+
+	The shell script was executed as follows:
+
+./getfrequentwords.sh REVIEWS/*;
+
+	Unfortunately, for some reason, the parallel command would only take one of the files as input. As such, I copy pasted the contents of the script into the terminal and just ran it in my environment, which somehow did work; this was perhaps an error with how I imported the parallel directory into the script. The results are as follows:
+
+    643 book
+    234 read
+    214 quot
+    212 one
+    212 all
+    203 will
+    199 they
+    195 more
+    186 about
+    179 N
+    174 like
+    166 ha
+    165 what
+    165 their
+    163 some
+    158 time
+    156 out
+    149 people
+    136 on
+    132 work
+
+	The words seem to make sense: 'book', 'read', 'quot(es)', 'about', 'like', and 'time' are relevant to the fact that the reviews are supposed to inform about the book. 'One', 'all', 'will', 'more', and 'like' seem to imply that the reviewers are recommending the book and want to read more in the future, which would generally be more correlated towards helpful reviews than nonhelpful ones.
+	
+	7. I then repeated the same analysis for 100 customer reviews with helpfulness scores of 0, with the reviews being saved in directory REVIEWS_UNHELPFUL as REVIEWS_UNHELPFUL/reviewID.txt. The commands used are as follows, in this order.
+
+ln -s ~/amazon_reviews_us_Books_v1_02.tsv amazondb;
+
+sort -t'       ' -nk9 amazondb | head -n100 | while read line; do echo "$line" > $(echo "$line" | awk '{fname = sprintf("%s%s%s", "REVIEWS_UNHELPFUL/", $2, ".txt"); print fname}'); done &
+
+for file in REVIEWS_UNHELPFUL/*; do body=$(cut -f14 $file | sed -E 's/ed |ing |s |ly / /gi'); awk -v body="$body" -F'\t' '{OFS="\t"} {$14=body; print $0}' $file > tmp; mv tmp $(echo "$file"); done;
+	
+for file in REVIEWS_UNHELPFUL/*; do body=$(cut -f14 "$file" | sed "s/[,.;'#-=\"\(\)\\]\|and\|<...\/>\|\<.\>\|\<..\>\|ALSO \|COULD \|DOES \|EACH \|ELSE \|FROM \|HAVE \|JUST \|MAY \|MIGHT \|MINE \|MUST \|WHEN \|WHERE \|WHICH \|WHILE \|WITH \|WOULD \|YOUR \|AND \|ANY \|ARE \|BUT \|CAN \|DID \|FOR \|HAD \|HOW \|MAY \|NOR \|NOT \|WHO \|WHY \|YES \|YET \|YOU \|THE \|THIS \|HIS \|HER \|WAS \|THAT / /gi"); awk -v body="$body" -F'\t' '{OFS="\t"} {$14=body; print $0}' $file > tmp; mv tmp $(echo "$file"); done;
+
+time printf '%s\n' REVIEWS_UNHELPFUL/* | parallel ./commontext.sh {} twitterdb10k &
+
+splitWords () { head -n+2 "$1" | sed -r 's/[[:space:]]+/\n/g' | sed '/^$/d'; }
+getWordFrequency () { sort | uniq -c | sort -nr; }
+export -f splitWords;
+printf '%s\n' REVIEWS_UNHELPFUL/* | parallel splitWords | getWordFrequency | head -n20;
+
+	The top 20 words for the least helpful reviews are as follows:
+
+    244 book
+    192 N
+    167 0
+    130 thi
+    106 read
+     96 US
+     96 Books
+     83 the
+     68 5
+     67 one
+     65 to
+     64 like
+     59 Thi
+     53 all
+     51 about
+     51 I
+     49 will
+     46 a
+     45 good
+     44 they
+
+	Once again, some of the more specific words pertain to the book reviewing medium, as would be expected. Interestingly, the unhelpful review words '0' and '5'--presumably rating scores--do not exist within the most frequent words of the helpful reviews. Such seems to be the only standout difference between the unhelpful reviews and the helpful reviews beyond the fact that the unhelpful reviews were about 3 times less frequent (presumably due to bad reviews being brief and uninformative.)
+
+
